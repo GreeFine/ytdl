@@ -8,8 +8,8 @@ use regex::{Captures, Regex};
 use reqwest::Response;
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
 use std::iter::FromIterator;
+use std::str;
 use std::sync::Mutex;
 use url::form_urlencoded::parse;
 
@@ -110,6 +110,7 @@ impl Video {
     }
 
     pub fn video_sources(&self) -> Option<&VideoSorces> {
+        println!("?? {}", &self.initialized);
         if self.initialized {
             Some(&self.sources)
         } else {
@@ -128,17 +129,20 @@ impl Video {
     }
 
     #[inline]
-    pub fn initialize(&mut self) -> Result<()> {
+    pub async fn initialize(&mut self) -> Result<()> {
         if self.initialized {
             warn!("Video is already initialized !");
             return Ok(());
         }
         // We need to get it
-        self.get_video_info()?;
+        println!("WHat?");
+        self.get_video_info().await?;
+        println!("WHat2?");
+
         let url: String = format!("{}/watch?v={}", YOUTUBE_BASE_URL, self.id);
-        let mut res: Response = reqwest::get(&url)?;
-        let mut page = String::new();
-        res.read_to_string(&mut page)?;
+        let res: Response = reqwest::get(&url).await?;
+        let bytes = res.bytes().await?;
+        let page: &str = str::from_utf8(bytes.as_ref())?;
         let json_str = between(&page, "ytplayer.config = ", "</script>")
             .ok_or_else(|| err_msg("Json String Not found"))?;
         let config_pos = json_str
@@ -148,7 +152,7 @@ impl Video {
             .get(0..config_pos)
             .ok_or_else(|| err_msg("Config String Not found"))?;
         self.config = serde_json::from_str(config_str)?;
-        let tokens = get_tokens(&self.config.assets.js)?;
+        let tokens = get_tokens(&self.config.assets.js).await?;
         for source in &mut self.sources {
             let signature;
             {
@@ -166,11 +170,12 @@ impl Video {
     }
 
     #[inline]
-    fn get_video_info(&mut self) -> Result<()> {
+    async fn get_video_info(&mut self) -> Result<()> {
         let url: String = format!("{}?video_id={}", YOUTUBE_INFO_URL, self.id);
-        let mut res: Response = reqwest::get(&url)?;
-        let mut data = Vec::new();
-        res.read_to_end(&mut data)?;
+        println!("getvidinfo? id {}", self.id);
+        let res: Response = reqwest::get(&url).await?;
+        println!("getvidinfo? res {:?}", res);
+        let data = res.bytes().await?;
         self.info = parse(&data).into_owned().collect();
         let status = self
             .info
@@ -183,10 +188,11 @@ impl Video {
                 status
             ))?
         }
+        println!("\n\nINFO? {:?}\n\n", self.info);
         let sources = self
             .info
-            .get("url_encoded_fmt_stream_map")
-            .ok_or_else(|| err_msg("url_encoded_fmt_stream_map not found"))?;
+            .get("player_response")?
+            .ok_or_else(|| err_msg("player_response not found"))?;
         let sources = sources.split(',');
         for (i, source) in sources.enumerate() {
             let parsed = parse(&source.as_bytes());
@@ -202,7 +208,7 @@ impl Video {
 
 /// Extract signature deciphering tokens from html5player file.
 #[inline]
-fn get_tokens(html5_player_url: &str) -> Result<Vec<(String, usize)>> {
+async fn get_tokens(html5_player_url: &str) -> Result<Vec<(String, usize)>> {
     let re = Regex::new(r"player[-_]([a-zA-Z0-9\-_]+)")?;
     let player_id = re
         .captures(html5_player_url)
@@ -220,9 +226,9 @@ fn get_tokens(html5_player_url: &str) -> Result<Vec<(String, usize)>> {
     }
     // get the file and Calculate the tokens
     let player_url = YOUTUBE_BASE_URL.to_string() + html5_player_url;
-    let mut res: Response = reqwest::get(&player_url)?;
-    let mut file = String::new();
-    res.read_to_string(&mut file)?;
+    let res: Response = reqwest::get(&player_url).await?;
+    let bytes = res.bytes().await?;
+    let file: &str = str::from_utf8(bytes.as_ref())?;
     let tokens = exteract_actions(&file)?;
     debug!("Tokens {:?}", tokens);
     container.insert(player_id.to_string(), tokens.clone());
